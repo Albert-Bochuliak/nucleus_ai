@@ -28,21 +28,26 @@ class Event(BaseModel):
 
 class DedupService:
     def __init__(self, redis: Redis, set_key: str = DEDUP_SET_KEY) -> None:
+        # Store Redis client and set key used for processed event IDs.
         self._redis = redis
         self._set_key = set_key
 
     async def is_processed(self, event_id: str) -> bool:
+        # Check whether this event was already handled before.
         return bool(await self._redis.sismember(self._set_key, event_id))
 
     async def mark_processed(self, event_id: str) -> None:
+        # Mark event ID as processed for idempotency.
         await self._redis.sadd(self._set_key, event_id)
 
 
 class TransactionService:
     def __init__(self, pool: asyncpg.Pool) -> None:
+        # Store DB pool for transactional writes.
         self._pool = pool
 
     async def insert_converted(self, event: Event, amount_usd: Decimal) -> bool:
+        # Persist converted transaction once; skip if already processed.
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 marker = await connection.fetchval(
@@ -85,12 +90,14 @@ class Worker:
         fx_service: FxService,
         transaction_service: TransactionService,
     ) -> None:
+        # Wire all dependencies required for stream processing.
         self._redis = redis
         self._dedup_service = dedup_service
         self._fx_service = fx_service
         self._transaction_service = transaction_service
 
     async def run(self) -> None:
+        # Continuously consume pending and new messages from the stream.
         await ensure_consumer_group(
             self._redis,
             stream_name=STREAM_NAME,
@@ -119,11 +126,13 @@ class Worker:
                 await self._handle_batch(messages)
 
     async def _handle_batch(self, messages: list[tuple[str, list[tuple[str, dict[str, str]]]]]) -> None:
+        # Process each message from the fetched batch.
         for _, stream_messages in messages:
             for message_id, fields in stream_messages:
                 await self._process_with_retry(message_id, fields)
 
     async def _process_with_retry(self, message_id: str, fields: dict[str, str]) -> None:
+        # Handle a single message with exponential backoff on transient failures.
         event = Event.model_validate(fields)
 
         if await self._dedup_service.is_processed(event.id):
@@ -147,6 +156,7 @@ class Worker:
 
 
 async def main() -> None:
+    # Create infrastructure clients and start worker loop.
     postgres_dsn = os.getenv(
         "POSTGRES_DSN",
         "postgresql://app:app@localhost:5432/events",

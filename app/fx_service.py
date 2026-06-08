@@ -15,6 +15,7 @@ class FxService:
         retry_base_delay_seconds: float = 1.0,
         mock_rates: Mapping[str, Decimal] | None = None,
     ) -> None:
+        # Configure HTTP client, cache TTL, retry policy, and optional mock rates.
         self._client = client
         self._ttl_seconds = ttl_seconds
         self._max_retries = max_retries
@@ -23,6 +24,7 @@ class FxService:
         self._cache: dict[str, tuple[Decimal, float]] = {}
 
     async def get_rate(self, currency: str) -> Decimal:
+        # Resolve FX rate to USD using cache first, then API with retries.
         code = currency.upper()
         if code == "USD":
             return Decimal("1")

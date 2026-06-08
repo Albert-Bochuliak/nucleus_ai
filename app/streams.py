@@ -16,6 +16,7 @@ async def ensure_consumer_group(
     stream_name: str = STREAM_NAME,
     group_name: str = CONSUMER_GROUP_NAME,
 ) -> None:
+    # Create consumer group once; ignore error when it already exists.
     try:
         await redis.xgroup_create(
             name=stream_name,
@@ -29,6 +30,7 @@ async def ensure_consumer_group(
 
 
 def _event_to_stream_fields(event: BaseModel | dict[str, Any]) -> dict[str, str]:
+    # Normalize event payload to string fields for Redis stream storage.
     if isinstance(event, BaseModel):
         payload = event.model_dump(mode="json")
     else:
@@ -42,6 +44,7 @@ async def publish_event(
     stream_name: str = STREAM_NAME,
     group_name: str = CONSUMER_GROUP_NAME,
 ) -> str:
+    # Publish event to stream and return message ID.
     owns_client = redis is None
     client = redis or Redis.from_url(REDIS_URL, decode_responses=True)
 

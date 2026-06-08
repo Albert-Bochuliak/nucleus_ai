@@ -48,17 +48,21 @@ class MetricsOut(BaseModel):
 
 class EventService:
     def __init__(self, redis: Redis) -> None:
+        # Store Redis client used to publish incoming events.
         self._redis = redis
 
     async def publish(self, event: EventIn) -> None:
+        # Send event payload to Redis stream for async processing.
         await publish_event(event, redis=self._redis)
 
 
 class UserService:
     def __init__(self, pool: asyncpg.Pool) -> None:
+        # Store PostgreSQL connection pool for read queries.
         self._pool = pool
 
     async def get_summary(self, user_id: str) -> UserSummaryOut:
+        # Fetch total USD amount and transaction count for one user.
         query = """
             SELECT
                 COALESCE(SUM(amount_usd), 0) AS total_usd,
@@ -77,23 +81,34 @@ class UserService:
     async def list_transactions(
         self,
         user_id: str,
+        from_ts: datetime | None,
+        to_ts: datetime | None,
         page: int,
         limit: int,
     ) -> TransactionsPageOut:
+        # Return paginated transactions ordered by newest first.
         offset = (page - 1) * limit
 
-        total_query = "SELECT COUNT(*)::INT AS total FROM transactions WHERE user_id = $1"
+        total_query = """
+            SELECT COUNT(*)::INT AS total
+            FROM transactions
+            WHERE user_id = $1
+              AND ($2::timestamptz IS NULL OR \"timestamp\" >= $2)
+              AND ($3::timestamptz IS NULL OR \"timestamp\" <= $3)
+        """
         list_query = """
             SELECT id, user_id, amount_original, currency, amount_usd, "timestamp"
             FROM transactions
             WHERE user_id = $1
+              AND ($2::timestamptz IS NULL OR "timestamp" >= $2)
+              AND ($3::timestamptz IS NULL OR "timestamp" <= $3)
             ORDER BY "timestamp" DESC
-            LIMIT $2 OFFSET $3
+            LIMIT $4 OFFSET $5
         """
 
         async with self._pool.acquire() as connection:
-            total_row = await connection.fetchrow(total_query, user_id)
-            rows = await connection.fetch(list_query, user_id, limit, offset)
+            total_row = await connection.fetchrow(total_query, user_id, from_ts, to_ts)
+            rows = await connection.fetch(list_query, user_id, from_ts, to_ts, limit, offset)
 
         items = [TransactionOut.model_validate(dict(row)) for row in rows]
         return TransactionsPageOut(
@@ -103,8 +118,9 @@ class UserService:
             items=items,
         )
 
-
+# Application lifespan management
 async def lifespan(app: FastAPI):
+    # Initialize shared DB and Redis clients on startup and close on shutdown.
     postgres_dsn = os.getenv(
         "POSTGRES_DSN",
         "postgresql://app:app@localhost:5432/events",
@@ -125,10 +141,12 @@ app = FastAPI(lifespan=lifespan)
 
 
 def get_event_service(request: Request) -> EventService:
+    # Build event service from app-level Redis client.
     return EventService(redis=request.app.state.redis)
 
 
 def get_user_service(request: Request) -> UserService:
+    # Build user service from app-level PostgreSQL pool.
     return UserService(pool=request.app.state.pg_pool)
 
 
@@ -137,37 +155,41 @@ async def post_event(
     payload: EventIn,
     service: EventService = Depends(get_event_service),
 ) -> dict[str, str]:
-    metrics.increment_queue_lag()
+    # Accept event and enqueue it for asynchronous worker processing.
     try:
         await service.publish(payload)
         metrics.increment_events_processed()
         return {"status": "accepted"}
     except Exception:
         metrics.increment_failed_events()
-        metrics.decrement_queue_lag()
         raise
 
 
-@app.get("/users/{id}/summary", response_model=UserSummaryOut)
+@app.get("/users/{user_id}/summary", response_model=UserSummaryOut)
 async def get_user_summary(
-    id: str,
+    user_id: str,
     service: UserService = Depends(get_user_service),
 ) -> UserSummaryOut:
-    return await service.get_summary(id)
+    # Return aggregated summary for the requested user.
+    return await service.get_summary(user_id)
 
 
-@app.get("/users/{id}/transactions", response_model=TransactionsPageOut)
+@app.get("/users/{user_id}/transactions", response_model=TransactionsPageOut)
 async def get_user_transactions(
-    id: str,
+    user_id: str,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1, le=200),
     service: UserService = Depends(get_user_service),
 ) -> TransactionsPageOut:
-    return await service.list_transactions(id, page, limit)
+    # Return paginated transaction history for the requested user.
+    return await service.list_transactions(user_id, from_, to, page, limit)
 
 
 @app.get("/metrics", response_model=MetricsOut)
 async def get_metrics() -> MetricsOut:
+    # Return current in-memory processing metrics.
     snapshot = metrics.snapshot()
     return MetricsOut(
         events_processed=snapshot.events_processed,
