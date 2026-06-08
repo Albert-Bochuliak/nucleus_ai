@@ -12,7 +12,7 @@ A small async transaction ingestion and processing service built with Python, Fa
 ## Architecture and delivery semantics
 
 ### Queue choice
-I used **Redis Streams** because it provides:
+This service uses **Redis Streams** because it provides:
 - consumer groups,
 - pending-entry tracking,
 - acknowledgment (`XACK`) semantics,
@@ -93,9 +93,11 @@ Included unit tests:
 
 ## One trade-off made
 
-I chose in-memory metrics for simplicity. It is lightweight and good for local/demo usage, but metrics reset on process restart.
+The project uses in-memory metrics for simplicity. This is lightweight and good for local/demo usage, but metrics reset on process restart.
 
 ## What I would change at 10x load
+
+Potential scaling improvements at 10x load:
 
 1. Move to durable metrics/monitoring stack (Prometheus + Grafana).
 2. Partition queue workload by user or key to scale workers horizontally.
